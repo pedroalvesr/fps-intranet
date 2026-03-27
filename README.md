@@ -2,61 +2,85 @@
 
 FPS multiplayer estilo CS para rede local (LAN/intranet). Java 21 + Vulkan (LWJGL 3) + Netty.
 
-## Requisitos
+## Setup (todo mundo precisa fazer)
 
-- **Java 21+** (JDK)
-- **Vulkan-capable GPU**
-- **macOS** (Apple Silicon ou Intel):
+### 1. Clonar o projeto
+
+```bash
+git clone git@github.com:pedroharibeiropicpay/fps-intranet.git
+cd fps-intranet
+```
+
+### 2. Instalar dependências
+
+- **Java 21+** (JDK) — `java -version` pra conferir
+- **macOS** — instalar Vulkan:
   ```bash
   brew install vulkan-loader molten-vk
   ```
 
-## Build
+### 3. Build
 
 ```bash
 ./gradlew build
 ```
 
-## Como jogar
+## Como jogar em rede (multiplayer)
 
-### 1. Iniciar o Server
+```
+    Rede local (ex: 10.200.1.x)
+    ┌──────────────────────────────────────────┐
+    │                                          │
+    │  [Server]  10.200.1.50:27015 (UDP)       │
+    │     ▲  ▲  ▲                              │
+    │     │  │  │                               │
+    │     │  │  └── Client 3: "Ana"            │
+    │     │  └───── Client 2: "João"           │
+    │     └──────── Client 1: "Pedro"          │
+    │                                          │
+    └──────────────────────────────────────────┘
+```
+
+Todos precisam estar na **mesma rede** (mesma VLAN/subnet). Na VPN do PicPay funciona se estiverem na mesma rede corporativa. O protocolo é **UDP na porta 27015**.
+
+### 1. Alguém vira o Server
+
+Uma pessoa inicia o server (não precisa de GPU, pode ser qualquer máquina):
 
 ```bash
 ./gradlew :server:run
 ```
 
-O server escuta na porta **27015** (UDP). Anote o IP da máquina (ex: `192.168.1.100`).
-
-### 2. Conectar Clients
+Essa pessoa descobre o IP local:
 
 ```bash
-# macOS — precisa exportar antes de rodar
-export DYLD_LIBRARY_PATH=/opt/homebrew/lib
+# macOS
+ipconfig getifaddr en0
 
-# Conectar
-./gradlew :client:run -Dserver=192.168.1.100 -Dname="SeuNome"
+# Linux
+hostname -I | awk '{print $1}'
 
-# Teste local
-./gradlew :client:run -Dserver=127.0.0.1 -Dname="Pedro"
+# Windows
+ipconfig | findstr IPv4
 ```
 
-**Alternativa (java direto, mais confiável no macOS):**
+Compartilha o IP com o grupo (ex: `10.200.1.50`).
+
+### 2. Todo mundo conecta como Client
+
+Cada jogador roda no seu computador:
 
 ```bash
-# Build primeiro
-./gradlew build
-
-# Rodar server
-java --enable-native-access=ALL-UNNAMED \
-  -cp "server/build/libs/*:shared/build/libs/*" \
-  com.picpay.fps.server.GameServer
-
-# Rodar client (outro terminal)
+# macOS — exportar antes de rodar
 export DYLD_LIBRARY_PATH=/opt/homebrew/lib
-java -XstartOnFirstThread --enable-native-access=ALL-UNNAMED \
-  -cp "client/build/libs/*:shared/build/libs/*" \
-  com.picpay.fps.client.game.GameClient 127.0.0.1 "SeuNome"
+
+# Conectar (troque o IP e o nome)
+./gradlew :client:run -Dserver=10.200.1.50 -Dname="SeuNome"
 ```
+
+O host (quem roda o server) também pode jogar — basta abrir outro terminal e conectar com `-Dserver=127.0.0.1`.
+
+O server aceita até **20 jogadores** e distribui automaticamente nos times **Red** e **Blue**.
 
 ### Controles
 
@@ -68,6 +92,14 @@ java -XstartOnFirstThread --enable-native-access=ALL-UNNAMED \
 | Shift | Correr |
 | ESC | Liberar/capturar mouse |
 
+## Gameplay
+
+- **Team Deathmatch** — Red vs Blue (10v10)
+- Mapa arena com paredes de cobertura
+- Arma hitscan (raio instantâneo, estilo CS)
+- Auto-respawn em 3 segundos
+- Visual low-poly (sem texturas, cores por vértice)
+
 ## Arquitetura
 
 ```
@@ -77,38 +109,56 @@ fps-intranet/
 └── client/     → Vulkan renderer, GLFW input, networking
 ```
 
-### Modelo de Rede
-- **Server autoritativo**: server processa toda a lógica de jogo
+- **Server autoritativo**: processa toda a lógica de jogo
 - **Client prediction**: client move localmente para responsividade
 - **UDP via Netty**: baixa latência, ideal para LAN
-- **Snapshots**: server envia estado do mundo a cada tick
-
-### Gameplay (MVP)
-- Team Deathmatch (Red vs Blue)
-- Até 20 jogadores (10v10)
-- Mapa arena com cover walls
-- Arma hitscan (raio instantâneo)
-- Auto-respawn em 3 segundos
-- Visual low-poly (cores por vértice, sem texturas)
+- **Snapshots**: server broadcast do estado do mundo a cada tick
 
 ## Configuração
 
-Edite `shared/.../constants/GameConfig.java` para ajustar:
-- Porta do server, tick rate, max jogadores
-- Velocidade, HP, dano das armas
-- Tamanho do mapa, sensibilidade do mouse, FOV
+Edite `shared/src/main/java/com/picpay/fps/shared/constants/GameConfig.java` para ajustar:
+- `SERVER_PORT` — porta UDP (padrão: 27015)
+- `MAX_PLAYERS` — máximo de jogadores (padrão: 20)
+- `TICK_RATE` — ticks por segundo do server (padrão: 64)
+- `PLAYER_SPEED` / `PLAYER_SPRINT_SPEED` — velocidade de movimento
+- `PLAYER_MAX_HP` — vida máxima
+- `PISTOL_DAMAGE` / `RIFLE_DAMAGE` — dano das armas
+- `MOUSE_SENSITIVITY` / `FOV` — controles de câmera
+
+Depois de alterar, rebuilde: `./gradlew build`
 
 ## Troubleshooting
 
 ### macOS: processo morre silenciosamente (SIGKILL)
-Garanta que o Vulkan loader está instalado:
+O Vulkan loader não está instalado ou não está no path:
 ```bash
 brew install vulkan-loader molten-vk
 export DYLD_LIBRARY_PATH=/opt/homebrew/lib
 ```
 
-### "Address already in use" no server
-Mate processos anteriores: `lsof -ti:27015 | xargs kill`
+### Client não conecta no server
+1. Confira se estão na **mesma rede**
+2. Confira o **IP** (não use `localhost` — use o IP real)
+3. Confira o **firewall** da máquina do server:
+   - macOS: System Settings → Network → Firewall → liberar porta 27015 UDP
+   - Ou desative temporariamente pra testar
+4. Teste a porta: `nc -u -z <IP_DO_SERVER> 27015`
 
-### Firewall bloqueando conexão
-Abra a porta UDP 27015. No macOS: System Settings → Network → Firewall.
+### "Address already in use" no server
+O server anterior ainda está rodando. Mate ele:
+```bash
+lsof -ti:27015 | xargs kill
+```
+
+### Windows
+O build Gradle detecta o OS automaticamente e baixa os natives corretos. Não precisa de MoltenVK — Vulkan roda nativamente. Só garanta que tem drivers de GPU atualizados.
+
+### Linux
+Instale o Vulkan SDK do seu distro:
+```bash
+# Ubuntu/Debian
+sudo apt install vulkan-tools libvulkan-dev
+
+# Fedora
+sudo dnf install vulkan-tools vulkan-loader-devel
+```
