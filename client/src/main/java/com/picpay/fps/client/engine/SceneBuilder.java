@@ -138,6 +138,20 @@ public class SceneBuilder {
         });
     }
 
+    /**
+     * Add a single triangle with uniform color.
+     */
+    public void addTriangle(float x1, float y1, float z1,
+                            float x2, float y2, float z2,
+                            float x3, float y3, float z3,
+                            float r, float g, float b) {
+        triangles.add(new float[]{
+            x1, y1, z1, r, g, b,
+            x2, y2, z2, r, g, b,
+            x3, y3, z3, r, g, b
+        });
+    }
+
     private void addQuad(float x1, float y1, float z1,
                          float x2, float y2, float z2,
                          float x3, float y3, float z3,

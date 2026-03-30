@@ -18,6 +18,11 @@ public final class GameConfig {
     public static final float GRAVITY = 9.81f;
     public static final float JUMP_VELOCITY = 5.0f;
 
+    // Lobby
+    public static final int MIN_PLAYERS_TO_START = 2;
+    public static final int LOBBY_COUNTDOWN_SECONDS = 10;
+    public static final float LOBBY_BROADCAST_RATE = 0.5f; // seconds between lobby state broadcasts
+
     // Weapons
     public static final int PISTOL_DAMAGE = 25;
     public static final float PISTOL_FIRE_RATE = 0.3f;

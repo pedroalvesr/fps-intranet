@@ -19,6 +19,7 @@ public class ServerPlayer {
     private int kills, deaths;
     private int lastProcessedInput;
     private float shootCooldown;
+    private boolean ready;
     private java.net.InetSocketAddress address;
 
     public ServerPlayer(int id, String name, byte team) {
@@ -55,6 +56,8 @@ public class ServerPlayer {
     public void setLastProcessedInput(int seq) { this.lastProcessedInput = seq; }
     public float getShootCooldown() { return shootCooldown; }
     public void setShootCooldown(float cd) { this.shootCooldown = cd; }
+    public boolean isReady() { return ready; }
+    public void setReady(boolean ready) { this.ready = ready; }
     public java.net.InetSocketAddress getAddress() { return address; }
     public void setAddress(java.net.InetSocketAddress address) { this.address = address; }
 

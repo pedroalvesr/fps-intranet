@@ -7,6 +7,7 @@ public enum PacketType {
     PLAYER_INPUT((byte) 0x03),
     SHOOT((byte) 0x04),
     CHAT((byte) 0x05),
+    PLAYER_READY((byte) 0x06),
 
     // Server → Client
     CONNECT_ACK((byte) 0x10),
@@ -17,7 +18,9 @@ public enum PacketType {
     HIT_CONFIRM((byte) 0x15),
     KILL_EVENT((byte) 0x16),
     SPAWN((byte) 0x17),
-    WORLD_SNAPSHOT((byte) 0x18);
+    WORLD_SNAPSHOT((byte) 0x18),
+    LOBBY_STATE((byte) 0x19),
+    GAME_START((byte) 0x1A);
 
     private final byte id;
 

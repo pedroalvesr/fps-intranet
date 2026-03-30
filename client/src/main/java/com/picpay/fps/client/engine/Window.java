@@ -111,6 +111,12 @@ public class Window {
     public boolean isMouseGrabbed() { return mouseGrabbed; }
     public boolean isLeftMousePressed() { return leftMousePressed; }
 
+    public void setMouseGrabbed(boolean grabbed) {
+        this.mouseGrabbed = grabbed;
+        glfwSetInputMode(handle, GLFW_CURSOR,
+            grabbed ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    }
+
     public void cleanup() {
         glfwFreeCallbacks(handle);
         glfwDestroyWindow(handle);

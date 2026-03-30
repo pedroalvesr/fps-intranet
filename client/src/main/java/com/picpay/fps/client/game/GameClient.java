@@ -16,22 +16,38 @@ import static org.lwjgl.glfw.GLFW.*;
 
 /**
  * Main game client — ties together rendering, networking, and input.
+ * Manages LOBBY and PLAYING states.
  */
 public class GameClient {
     private static final Logger LOG = Logger.getLogger(GameClient.class.getName());
+
+    private enum State { LOBBY, PLAYING }
 
     private Window window;
     private VulkanRenderer renderer;
     private Camera camera;
     private SceneBuilder sceneBuilder;
+    private LobbyRenderer lobbyRenderer;
     private ClientNetworkManager network;
 
     // Remote players state (interpolated)
     private final Map<Integer, RemotePlayer> remotePlayers = new ConcurrentHashMap<>();
 
+    // Client state
+    private State state = State.LOBBY;
     private String serverHost = "127.0.0.1";
     private String playerName = "Player";
     private boolean running = true;
+    private boolean localReady = false;
+    private boolean readyKeyWasPressed = false;
+
+    // Lobby state from server
+    private volatile LobbyStatePacket.LobbyPlayer[] lobbyPlayers = new LobbyStatePacket.LobbyPlayer[0];
+    private volatile byte lobbyPhase = 0;
+    private volatile byte lobbyCountdown = 0;
+
+    // Lobby camera
+    private float lobbyCameraAngle = 0;
 
     public static void main(String[] args) {
         GameClient client = new GameClient();
@@ -69,6 +85,7 @@ public class GameClient {
         camera.updateProjection(renderer.getWidth(), renderer.getHeight());
 
         sceneBuilder = new SceneBuilder();
+        lobbyRenderer = new LobbyRenderer(sceneBuilder);
 
         network = new ClientNetworkManager();
         network.connect(serverHost, playerName);
@@ -83,7 +100,10 @@ public class GameClient {
             throw new RuntimeException("Could not connect to server at " + serverHost);
         }
 
-        LOG.info("Connected to server!");
+        LOG.info("Connected to server! Waiting in lobby...");
+
+        // Release mouse in lobby (not grabbed)
+        window.setMouseGrabbed(false);
     }
 
     private void gameLoop() {
@@ -96,38 +116,96 @@ public class GameClient {
             double frameTime = (now - lastTime) / 1_000_000_000.0;
             lastTime = now;
 
-            // Cap frame time to avoid spiral of death
             if (frameTime > 0.25) frameTime = 0.25;
             accumulator += frameTime;
 
-            // Handle window events
             window.pollEvents();
 
-            // Fixed timestep for input/networking
             while (accumulator >= tickDuration) {
-                processInput();
                 processNetworkPackets();
+
+                switch (state) {
+                    case LOBBY -> processLobbyInput();
+                    case PLAYING -> processGameInput();
+                }
                 accumulator -= tickDuration;
             }
 
-            // Handle resize
             if (window.isResized()) {
                 renderer.recreateSwapchain();
                 camera.updateProjection(renderer.getWidth(), renderer.getHeight());
             }
 
-            // Render
-            render();
+            switch (state) {
+                case LOBBY -> renderLobby(frameTime);
+                case PLAYING -> renderGame();
+            }
         }
     }
 
-    private void processInput() {
+    // ─── LOBBY ───────────────────────────────────────────────────────────
+
+    private void processLobbyInput() {
+        // R key toggles ready (with debounce)
+        boolean rPressed = window.isKeyDown(GLFW_KEY_R);
+        if (rPressed && !readyKeyWasPressed) {
+            localReady = !localReady;
+            PlayerReadyPacket pkt = new PlayerReadyPacket(localReady);
+            network.send(pkt.serialize());
+            LOG.info("Ready: " + localReady);
+        }
+        readyKeyWasPressed = rPressed;
+    }
+
+    private void renderLobby(double dt) {
+        // Slowly rotating camera looking at the center of the map from above
+        lobbyCameraAngle += (float) (dt * 0.3);
+        float camDist = 20.0f;
+        float camHeight = 15.0f;
+        float camX = (float) Math.sin(lobbyCameraAngle) * camDist;
+        float camZ = (float) Math.cos(lobbyCameraAngle) * camDist;
+
+        camera.getPosition().set(camX, camHeight, camZ);
+
+        // Look at center
+        Matrix4f view = new Matrix4f().lookAt(
+            camX, camHeight, camZ,
+            0, 2, 0,
+            0, 1, 0
+        );
+
+        float aspect = (float) renderer.getWidth() / renderer.getHeight();
+        Matrix4f proj = new Matrix4f().perspective(
+            (float) Math.toRadians(60), aspect,
+            GameConfig.NEAR_PLANE, GameConfig.FAR_PLANE, true
+        );
+        proj.m11(proj.m11() * -1); // Vulkan Y flip
+
+        Matrix4f mvp = new Matrix4f();
+        proj.mul(view, mvp);
+
+        lobbyRenderer.render(lobbyPlayers, lobbyPhase, lobbyCountdown,
+            network.getLocalPlayerId(), localReady);
+
+        float[] vertices = sceneBuilder.build();
+        renderer.uploadVertices(vertices);
+        renderer.renderFrame(mvp);
+    }
+
+    private void transitionToPlaying() {
+        state = State.PLAYING;
+        LOG.info("=== GAME STARTING! ===");
+        // Grab mouse for FPS controls
+        window.setMouseGrabbed(true);
+    }
+
+    // ─── PLAYING ─────────────────────────────────────────────────────────
+
+    private void processGameInput() {
         if (!window.isMouseGrabbed()) return;
 
-        // Mouse look
         camera.rotate(window.getMouseDeltaX(), window.getMouseDeltaY());
 
-        // Build input bitfield
         byte keys = 0;
         if (window.isKeyDown(GLFW_KEY_W)) keys |= 0x01;
         if (window.isKeyDown(GLFW_KEY_S)) keys |= 0x02;
@@ -137,10 +215,9 @@ public class GameClient {
         if (window.isKeyDown(GLFW_KEY_LEFT_SHIFT)) keys |= 0x20;
         if (window.isLeftMousePressed()) keys |= 0x40;
 
-        // Send input to server
         network.sendInput(keys, camera.getYaw(), camera.getPitch());
 
-        // Client-side prediction (move locally too)
+        // Client-side prediction
         float dt = (float) GameConfig.TICK_DURATION;
         float speed = window.isKeyDown(GLFW_KEY_LEFT_SHIFT) ? GameConfig.PLAYER_SPRINT_SPEED : GameConfig.PLAYER_SPEED;
 
@@ -160,6 +237,28 @@ public class GameClient {
         }
     }
 
+    private void renderGame() {
+        sceneBuilder.clear();
+        sceneBuilder.addMap();
+
+        for (RemotePlayer rp : remotePlayers.values()) {
+            sceneBuilder.addPlayer(rp.x, rp.y, rp.z, rp.yaw, rp.team, rp.alive);
+        }
+
+        sceneBuilder.addCrosshair(
+            camera.getPosition().x, camera.getPosition().y, camera.getPosition().z,
+            camera.getYaw(), camera.getPitch()
+        );
+
+        float[] vertices = sceneBuilder.build();
+        renderer.uploadVertices(vertices);
+
+        Matrix4f mvp = camera.getViewProjectionMatrix();
+        renderer.renderFrame(mvp);
+    }
+
+    // ─── NETWORKING ──────────────────────────────────────────────────────
+
     private void processNetworkPackets() {
         byte[] data;
         while ((data = network.pollPacket()) != null) {
@@ -167,6 +266,8 @@ public class GameClient {
             if (type == null) continue;
 
             switch (type) {
+                case LOBBY_STATE -> handleLobbyState(data);
+                case GAME_START -> transitionToPlaying();
                 case WORLD_SNAPSHOT -> handleWorldSnapshot(data);
                 case SPAWN -> handleSpawn(data);
                 case KILL_EVENT -> handleKillEvent(data);
@@ -175,7 +276,16 @@ public class GameClient {
         }
     }
 
+    private void handleLobbyState(byte[] data) {
+        LobbyStatePacket pkt = LobbyStatePacket.deserialize(data);
+        lobbyPlayers = pkt.getPlayers();
+        lobbyPhase = pkt.getPhase();
+        lobbyCountdown = pkt.getCountdown();
+    }
+
     private void handleWorldSnapshot(byte[] data) {
+        if (state != State.PLAYING) return;
+
         WorldSnapshotPacket snapshot = WorldSnapshotPacket.deserialize(data);
         ByteBuffer buf = ByteBuffer.wrap(snapshot.getPlayerStatesData());
 
@@ -189,9 +299,6 @@ public class GameClient {
             int lastInputSeq = buf.getInt();
 
             if (id == network.getLocalPlayerId()) {
-                // Server reconciliation: correct local position from server authority
-                // For now, just snap to server position (basic implementation)
-                // A full implementation would replay unprocessed inputs
                 camera.getPosition().set(x, y + 1.6f, z);
             } else {
                 RemotePlayer rp = remotePlayers.computeIfAbsent(id, k -> new RemotePlayer());
@@ -203,7 +310,6 @@ public class GameClient {
             }
         }
 
-        // Remove stale players (disconnected)
         long now = System.currentTimeMillis();
         remotePlayers.entrySet().removeIf(e -> now - e.getValue().lastUpdate > 5000);
     }
@@ -223,29 +329,7 @@ public class GameClient {
         LOG.info(killerName + " killed " + victimName);
     }
 
-    private void render() {
-        sceneBuilder.clear();
-
-        // Build scene
-        sceneBuilder.addMap();
-
-        // Add remote players
-        for (RemotePlayer rp : remotePlayers.values()) {
-            sceneBuilder.addPlayer(rp.x, rp.y, rp.z, rp.yaw, rp.team, rp.alive);
-        }
-
-        // Add crosshair
-        sceneBuilder.addCrosshair(
-            camera.getPosition().x, camera.getPosition().y, camera.getPosition().z,
-            camera.getYaw(), camera.getPitch()
-        );
-
-        float[] vertices = sceneBuilder.build();
-        renderer.uploadVertices(vertices);
-
-        Matrix4f mvp = camera.getViewProjectionMatrix();
-        renderer.renderFrame(mvp);
-    }
+    // ─── CLEANUP ─────────────────────────────────────────────────────────
 
     private void cleanup() {
         LOG.info("Shutting down...");
@@ -254,9 +338,6 @@ public class GameClient {
         if (window != null) window.cleanup();
     }
 
-    /**
-     * Simple container for remote player state.
-     */
     static class RemotePlayer {
         float x, y, z;
         float yaw, pitch;

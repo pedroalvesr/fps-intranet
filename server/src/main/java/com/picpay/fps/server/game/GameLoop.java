@@ -13,9 +13,12 @@ import java.util.logging.Logger;
 
 /**
  * Authoritative game loop running at 64 ticks/second.
+ * Manages two phases: LOBBY (waiting for players) and PLAYING (active game).
  */
 public class GameLoop implements Runnable {
     private static final Logger LOG = Logger.getLogger(GameLoop.class.getName());
+
+    public enum Phase { LOBBY, COUNTDOWN, PLAYING }
 
     private final Map<Integer, ServerPlayer> players = new ConcurrentHashMap<>();
     private final GameMap map = new GameMap();
@@ -25,6 +28,11 @@ public class GameLoop implements Runnable {
     private volatile boolean running = true;
     private int tick = 0;
 
+    // Phase management
+    private volatile Phase phase = Phase.LOBBY;
+    private float countdownTimer = 0;
+    private float lobbyBroadcastTimer = 0;
+
     // Callback to send packets to clients
     private BiConsumer<ServerPlayer, byte[]> sendToPlayer;
     private java.util.function.Consumer<byte[]> broadcastAll;
@@ -32,17 +40,22 @@ public class GameLoop implements Runnable {
     public void setSendToPlayer(BiConsumer<ServerPlayer, byte[]> fn) { this.sendToPlayer = fn; }
     public void setBroadcastAll(java.util.function.Consumer<byte[]> fn) { this.broadcastAll = fn; }
 
+    public Phase getPhase() { return phase; }
+
     public ServerPlayer addPlayer(String name, java.net.InetSocketAddress address) {
         int id = nextPlayerId.getAndIncrement();
         byte team = (byte) (teamCounter.getAndIncrement() % 2);
         ServerPlayer player = new ServerPlayer(id, name, team);
         player.setAddress(address);
 
-        float[] spawn = map.getSpawnPoint(team);
-        player.respawn(spawn[0], spawn[1], spawn[2]);
+        // In lobby, don't spawn yet — just register
+        if (phase == Phase.PLAYING) {
+            float[] spawn = map.getSpawnPoint(team);
+            player.respawn(spawn[0], spawn[1], spawn[2]);
+        }
 
         players.put(id, player);
-        LOG.info("Player joined: " + name + " (id=" + id + ", team=" + (team == 0 ? "RED" : "BLUE") + ")");
+        LOG.info("Player joined: " + name + " (id=" + id + ", team=" + (team == 0 ? "RED" : "BLUE") + ") [" + phase + "]");
         return player;
     }
 
@@ -50,6 +63,61 @@ public class GameLoop implements Runnable {
         ServerPlayer removed = players.remove(playerId);
         if (removed != null) {
             LOG.info("Player left: " + removed.getName());
+            // If in countdown and not enough players/ready anymore, cancel
+            if (phase == Phase.COUNTDOWN) {
+                checkCountdownConditions();
+            }
+        }
+    }
+
+    public void setPlayerReady(int playerId, boolean ready) {
+        ServerPlayer player = players.get(playerId);
+        if (player == null || phase == Phase.PLAYING) return;
+        player.setReady(ready);
+        LOG.info("Player " + player.getName() + " is " + (ready ? "READY" : "NOT READY"));
+        checkCountdownConditions();
+    }
+
+    private void checkCountdownConditions() {
+        if (phase == Phase.PLAYING) return;
+
+        int totalPlayers = players.size();
+        long readyCount = players.values().stream().filter(ServerPlayer::isReady).count();
+        boolean enoughPlayers = totalPlayers >= GameConfig.MIN_PLAYERS_TO_START;
+        boolean allReady = readyCount == totalPlayers && totalPlayers > 0;
+
+        if (enoughPlayers && allReady && phase != Phase.COUNTDOWN) {
+            // Start countdown
+            phase = Phase.COUNTDOWN;
+            countdownTimer = GameConfig.LOBBY_COUNTDOWN_SECONDS;
+            LOG.info("All players ready! Countdown started: " + GameConfig.LOBBY_COUNTDOWN_SECONDS + "s");
+        } else if (phase == Phase.COUNTDOWN && (!enoughPlayers || !allReady)) {
+            // Cancel countdown
+            phase = Phase.LOBBY;
+            countdownTimer = 0;
+            LOG.info("Countdown cancelled — not all players ready");
+        }
+    }
+
+    private void startGame() {
+        phase = Phase.PLAYING;
+        LOG.info("=== GAME STARTED with " + players.size() + " players ===");
+
+        // Spawn all players
+        for (ServerPlayer player : players.values()) {
+            float[] spawn = map.getSpawnPoint(player.getTeam());
+            player.respawn(spawn[0], spawn[1], spawn[2]);
+        }
+
+        // Broadcast game start
+        GameStartPacket startPkt = new GameStartPacket();
+        if (broadcastAll != null) broadcastAll.accept(startPkt.serialize());
+
+        // Broadcast spawns
+        for (ServerPlayer player : players.values()) {
+            SpawnPacket spawnPkt = new SpawnPacket(player.getId(),
+                player.getPosition().x, player.getPosition().y, player.getPosition().z);
+            if (broadcastAll != null) broadcastAll.accept(spawnPkt.serialize());
         }
     }
 
@@ -57,6 +125,9 @@ public class GameLoop implements Runnable {
     public Map<Integer, ServerPlayer> getPlayers() { return players; }
 
     public void processInput(int playerId, PlayerInputPacket input) {
+        // Only process game input during PLAYING phase
+        if (phase != Phase.PLAYING) return;
+
         ServerPlayer player = players.get(playerId);
         if (player == null) return;
 
@@ -93,6 +164,7 @@ public class GameLoop implements Runnable {
     @Override
     public void run() {
         LOG.info("Game loop started at " + GameConfig.TICK_RATE + " ticks/s");
+        LOG.info("Waiting for players in LOBBY...");
         long tickNanos = (long) (GameConfig.TICK_DURATION * 1_000_000_000);
 
         while (running) {
@@ -118,6 +190,36 @@ public class GameLoop implements Runnable {
         tick++;
         float dt = (float) GameConfig.TICK_DURATION;
 
+        switch (phase) {
+            case LOBBY -> updateLobby(dt);
+            case COUNTDOWN -> updateCountdown(dt);
+            case PLAYING -> updatePlaying(dt);
+        }
+    }
+
+    private void updateLobby(float dt) {
+        lobbyBroadcastTimer -= dt;
+        if (lobbyBroadcastTimer <= 0) {
+            broadcastLobbyState();
+            lobbyBroadcastTimer = GameConfig.LOBBY_BROADCAST_RATE;
+        }
+    }
+
+    private void updateCountdown(float dt) {
+        countdownTimer -= dt;
+
+        lobbyBroadcastTimer -= dt;
+        if (lobbyBroadcastTimer <= 0) {
+            broadcastLobbyState();
+            lobbyBroadcastTimer = GameConfig.LOBBY_BROADCAST_RATE;
+        }
+
+        if (countdownTimer <= 0) {
+            startGame();
+        }
+    }
+
+    private void updatePlaying(float dt) {
         // Update cooldowns and respawns
         for (ServerPlayer player : players.values()) {
             if (player.getShootCooldown() > 0) {
@@ -138,12 +240,28 @@ public class GameLoop implements Runnable {
         broadcastWorldSnapshot();
     }
 
+    private void broadcastLobbyState() {
+        if (broadcastAll == null) return;
+
+        LobbyStatePacket.LobbyPlayer[] lobbyPlayers = players.values().stream()
+            .map(p -> new LobbyStatePacket.LobbyPlayer(p.getId(), p.getName(), p.getTeam(), p.isReady()))
+            .toArray(LobbyStatePacket.LobbyPlayer[]::new);
+
+        byte phaseId = switch (phase) {
+            case LOBBY -> (byte) 0;
+            case COUNTDOWN -> (byte) 1;
+            case PLAYING -> (byte) 2;
+        };
+
+        LobbyStatePacket pkt = new LobbyStatePacket(phaseId, (byte) Math.max(0, Math.ceil(countdownTimer)), lobbyPlayers);
+        broadcastAll.accept(pkt.serialize());
+    }
+
     private void broadcastWorldSnapshot() {
         if (broadcastAll == null || players.isEmpty()) return;
 
-        // Serialize all player states into one snapshot
         int count = players.size();
-        ByteBuffer statesBuf = ByteBuffer.allocate(count * 31); // 31 bytes per player state
+        ByteBuffer statesBuf = ByteBuffer.allocate(count * 31);
 
         for (ServerPlayer p : players.values()) {
             statesBuf.putInt(p.getId());

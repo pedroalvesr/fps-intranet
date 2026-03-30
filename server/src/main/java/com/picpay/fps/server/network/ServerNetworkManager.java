@@ -86,6 +86,7 @@ public class ServerNetworkManager {
             switch (type) {
                 case CONNECT -> handleConnect(sender, data);
                 case PLAYER_INPUT -> handleInput(sender, data);
+                case PLAYER_READY -> handleReady(sender, data);
                 case DISCONNECT -> handleDisconnect(sender);
                 default -> {}
             }
@@ -102,10 +103,12 @@ public class ServerNetworkManager {
             ConnectAckPacket ack = new ConnectAckPacket(player.getId(), player.getTeam());
             sendToAddress(sender, ack.serialize());
 
-            // Notify others
-            SpawnPacket spawnPkt = new SpawnPacket(player.getId(),
-                player.getPosition().x, player.getPosition().y, player.getPosition().z);
-            broadcastToAll(spawnPkt.serialize());
+            // Only send spawn if game is already playing (late join)
+            if (gameLoop.getPhase() == GameLoop.Phase.PLAYING) {
+                SpawnPacket spawnPkt = new SpawnPacket(player.getId(),
+                    player.getPosition().x, player.getPosition().y, player.getPosition().z);
+                broadcastToAll(spawnPkt.serialize());
+            }
         }
 
         private void handleInput(InetSocketAddress sender, byte[] data) {
@@ -114,6 +117,14 @@ public class ServerNetworkManager {
 
             PlayerInputPacket input = PlayerInputPacket.deserialize(data);
             gameLoop.processInput(playerId, input);
+        }
+
+        private void handleReady(InetSocketAddress sender, byte[] data) {
+            Integer playerId = addressToPlayerId.get(sender);
+            if (playerId == null) return;
+
+            PlayerReadyPacket pkt = PlayerReadyPacket.deserialize(data);
+            gameLoop.setPlayerReady(playerId, pkt.isReady());
         }
 
         private void handleDisconnect(InetSocketAddress sender) {
