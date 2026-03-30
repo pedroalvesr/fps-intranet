@@ -52,9 +52,9 @@ tasks.named<JavaExec>("run") {
         environment("DYLD_LIBRARY_PATH", "/opt/homebrew/lib:" + (System.getenv("DYLD_LIBRARY_PATH") ?: ""))
         environment("VK_ICD_FILENAMES", System.getenv("VK_ICD_FILENAMES") ?: "")
     }
-    // Pass arguments: serverHost playerName
-    args = listOf(
-        System.getProperty("server") ?: "127.0.0.1",
-        System.getProperty("name") ?: "Player"
-    )
+    // Pass arguments: serverHost [playerName]
+    // Only pass playerName if explicitly set — otherwise the in-game name entry screen is shown
+    val serverArg = System.getProperty("server") ?: "127.0.0.1"
+    val nameArg = System.getProperty("name")
+    args = if (nameArg != null) listOf(serverArg, nameArg) else listOf(serverArg)
 }

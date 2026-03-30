@@ -17,6 +17,10 @@ public class SceneBuilder {
         triangles.clear();
     }
 
+    public int getTriangleCount() {
+        return triangles.size();
+    }
+
     /**
      * Add the arena map geometry.
      */
@@ -150,6 +154,17 @@ public class SceneBuilder {
             x2, y2, z2, r, g, b,
             x3, y3, z3, r, g, b
         });
+    }
+
+    /**
+     * Add a colored quad (4 vertices, same color). Used by GeometricFont for text segments.
+     */
+    public void addColoredQuad(float x1, float y1, float z1,
+                               float x2, float y2, float z2,
+                               float x3, float y3, float z3,
+                               float x4, float y4, float z4,
+                               float r, float g, float b) {
+        addQuad(x1, y1, z1, x2, y2, z2, x3, y3, z3, x4, y4, z4, r, g, b);
     }
 
     private void addQuad(float x1, float y1, float z1,

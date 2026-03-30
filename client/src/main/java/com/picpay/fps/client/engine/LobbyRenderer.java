@@ -4,13 +4,15 @@ import com.picpay.fps.shared.protocol.LobbyStatePacket;
 
 /**
  * Renders lobby screen: overhead view of the map with players standing in spawn,
- * ready indicators, and countdown display using geometric shapes.
+ * ready indicators, player names, and countdown display using geometric shapes.
  */
 public class LobbyRenderer {
     private final SceneBuilder sceneBuilder;
+    private final GeometricFont font;
 
-    public LobbyRenderer(SceneBuilder sceneBuilder) {
+    public LobbyRenderer(SceneBuilder sceneBuilder, GeometricFont font) {
         this.sceneBuilder = sceneBuilder;
+        this.font = font;
     }
 
     /**
@@ -42,6 +44,13 @@ public class LobbyRenderer {
                 addDiamond(px, indicatorY, pz, 0.2f, 1.0f, 0.2f, 0.2f); // red
             }
 
+            // Player name above ready indicator
+            String name = p.name();
+            if (name != null && !name.isEmpty()) {
+                float nameY = indicatorY + 0.6f;
+                font.renderText(name, px, nameY, pz - 0.1f, 0.3f, 1.0f, 1.0f, 1.0f, true);
+            }
+
             // Highlight local player with a ring on the ground
             if (p.id() == localPlayerId) {
                 addGroundRing(px, 0.01f, pz, 0.6f, 1.0f, 1.0f, 0.0f); // yellow ring
@@ -53,14 +62,15 @@ public class LobbyRenderer {
             addCountdownDisplay(0, 6.0f, -8.0f, countdown);
         }
 
-        // "Press R when ready" indicator — floating bar
+        // "Press R when ready" text indicator
         if (phase == 0) {
-            // Pulsing bar above the scene
             float pulse = (float) (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 300.0));
             if (localReady) {
-                addBar(0, 5.0f, -8.0f, 4.0f, 0.3f, 0.0f, 0.8f * pulse + 0.2f, 0.0f); // green pulse
+                font.renderText("READY", 0, 5.0f, -8.0f, 0.8f,
+                    0.0f, 0.8f * pulse + 0.2f, 0.0f, true);
             } else {
-                addBar(0, 5.0f, -8.0f, 4.0f, 0.3f, 0.8f * pulse + 0.2f, 0.8f * pulse + 0.2f, 0.0f); // yellow pulse
+                font.renderText("PRESS R", 0, 5.0f, -8.0f, 0.8f,
+                    0.8f * pulse + 0.2f, 0.8f * pulse + 0.2f, 0.0f, true);
             }
         }
     }
@@ -106,24 +116,8 @@ public class LobbyRenderer {
         }
     }
 
-    private void addBar(float cx, float cy, float cz, float width, float height,
-                        float r, float g, float b) {
-        float hw = width / 2;
-        float hh = height / 2;
-        float d = 0.1f;
-        sceneBuilder.addWallBox(cx - hw, cy - hh, cz - d, cx + hw, cy + hh, cz + d, r, g, b);
-    }
-
     private void addCountdownDisplay(float cx, float cy, float cz, int number) {
-        // Show countdown as stacked cubes (simple but visible)
-        float cubeSize = 0.8f;
-        for (int i = 0; i < number && i < 10; i++) {
-            float x = cx + (i - number / 2.0f) * (cubeSize + 0.2f);
-            sceneBuilder.addWallBox(
-                x - cubeSize / 2, cy - cubeSize / 2, cz - cubeSize / 2,
-                x + cubeSize / 2, cy + cubeSize / 2, cz + cubeSize / 2,
-                1.0f, 0.9f, 0.1f // yellow cubes
-            );
-        }
+        // Show countdown number as 7-segment text
+        font.renderText(String.valueOf(number), cx, cy, cz, 2.0f, 1.0f, 0.9f, 0.1f, true);
     }
 }

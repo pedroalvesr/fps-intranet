@@ -21,12 +21,13 @@ import static org.lwjgl.glfw.GLFW.*;
 public class GameClient {
     private static final Logger LOG = Logger.getLogger(GameClient.class.getName());
 
-    private enum State { LOBBY, PLAYING }
+    private enum State { NAME_ENTRY, LOBBY, PLAYING }
 
     private Window window;
     private VulkanRenderer renderer;
     private Camera camera;
     private SceneBuilder sceneBuilder;
+    private GeometricFont font;
     private LobbyRenderer lobbyRenderer;
     private ClientNetworkManager network;
 
@@ -34,7 +35,7 @@ public class GameClient {
     private final Map<Integer, RemotePlayer> remotePlayers = new ConcurrentHashMap<>();
 
     // Client state
-    private State state = State.LOBBY;
+    private State state = State.NAME_ENTRY;
     private String serverHost = "127.0.0.1";
     private String playerName = "Player";
     private boolean running = true;
@@ -49,11 +50,17 @@ public class GameClient {
     // Lobby camera
     private float lobbyCameraAngle = 0;
 
+    // Name entry
+    private boolean skipNameEntry = false;
+
     public static void main(String[] args) {
         GameClient client = new GameClient();
 
         if (args.length >= 1) client.serverHost = args[0];
-        if (args.length >= 2) client.playerName = args[1];
+        if (args.length >= 2) {
+            client.playerName = args[1];
+            client.skipNameEntry = true;
+        }
 
         client.run();
     }
@@ -73,7 +80,6 @@ public class GameClient {
     private void init() throws Exception {
         LOG.info("=== FPS Intranet Client ===");
         LOG.info("Server: " + serverHost);
-        LOG.info("Player: " + playerName);
 
         window = new Window();
         window.init();
@@ -85,12 +91,28 @@ public class GameClient {
         camera.updateProjection(renderer.getWidth(), renderer.getHeight());
 
         sceneBuilder = new SceneBuilder();
-        lobbyRenderer = new LobbyRenderer(sceneBuilder);
+        font = new GeometricFont(sceneBuilder);
+        lobbyRenderer = new LobbyRenderer(sceneBuilder, font);
 
+        window.setMouseGrabbed(false);
+
+        if (skipNameEntry) {
+            // Name provided via CLI — skip straight to connecting
+            connectToServer();
+        } else {
+            // Show name entry screen
+            state = State.NAME_ENTRY;
+            window.setTextInputActive(true);
+            window.setTextInputBuffer("");
+            LOG.info("Enter your name to join...");
+        }
+    }
+
+    private void connectToServer() throws Exception {
+        LOG.info("Player: " + playerName);
         network = new ClientNetworkManager();
         network.connect(serverHost, playerName);
 
-        // Wait for connection (up to 5 seconds)
         long deadline = System.currentTimeMillis() + 5000;
         while (!network.isConnected() && System.currentTimeMillis() < deadline) {
             Thread.sleep(50);
@@ -101,9 +123,7 @@ public class GameClient {
         }
 
         LOG.info("Connected to server! Waiting in lobby...");
-
-        // Release mouse in lobby (not grabbed)
-        window.setMouseGrabbed(false);
+        state = State.LOBBY;
     }
 
     private void gameLoop() {
@@ -122,9 +142,12 @@ public class GameClient {
             window.pollEvents();
 
             while (accumulator >= tickDuration) {
-                processNetworkPackets();
+                if (state != State.NAME_ENTRY) {
+                    processNetworkPackets();
+                }
 
                 switch (state) {
+                    case NAME_ENTRY -> processNameEntryInput();
                     case LOBBY -> processLobbyInput();
                     case PLAYING -> processGameInput();
                 }
@@ -137,10 +160,96 @@ public class GameClient {
             }
 
             switch (state) {
+                case NAME_ENTRY -> renderNameEntry();
                 case LOBBY -> renderLobby(frameTime);
                 case PLAYING -> renderGame();
             }
         }
+    }
+
+    // ─── NAME ENTRY ────────────────────────────────────────────────────
+
+    private void processNameEntryInput() {
+        if (window.consumeEnterPressed()) {
+            String name = window.getTextInputBuffer().trim();
+            if (!name.isEmpty()) {
+                playerName = name;
+                window.setTextInputActive(false);
+                try {
+                    connectToServer();
+                } catch (Exception e) {
+                    LOG.severe("Connection failed: " + e.getMessage());
+                    // Go back to name entry
+                    state = State.NAME_ENTRY;
+                    window.setTextInputActive(true);
+                }
+            }
+        }
+    }
+
+    private void renderNameEntry() {
+        sceneBuilder.clear();
+
+        // Dark platform floor
+        sceneBuilder.addColoredQuad(
+            -10, 0, -10,  10, 0, -10,
+            10, 0, 10,  -10, 0, 10,
+            0.08f, 0.08f, 0.12f
+        );
+
+        // Title: "FPS INTRANET"
+        font.renderText("FPS INTRANET", 0, 6.0f, -5.0f, 1.0f, 0.2f, 0.9f, 0.3f, true);
+
+        // Subtitle: "ENTER YOUR NAME"
+        font.renderText("ENTER YOUR NAME", 0, 4.0f, -5.0f, 0.5f, 0.7f, 0.7f, 0.7f, true);
+
+        // Input field background bar
+        sceneBuilder.addWallBox(-4.5f, 2.0f, -5.3f, 4.5f, 3.2f, -5.1f, 0.12f, 0.12f, 0.18f);
+
+        // Current typed text (z=-5.0, in front of background box)
+        String typed = window.getTextInputBuffer();
+        if (!typed.isEmpty()) {
+            font.renderText(typed, 0, 2.2f, -4.9f, 0.7f, 1.0f, 1.0f, 1.0f, true);
+        }
+
+        // Blinking cursor
+        boolean cursorVisible = (System.currentTimeMillis() / 500) % 2 == 0;
+        if (cursorVisible) {
+            float cursorX = typed.isEmpty() ? 0 : getTextEndX(typed, 0, 0.7f);
+            font.renderText("_", cursorX, 2.2f, -4.9f, 0.7f, 0.2f, 0.9f, 0.3f, false);
+        }
+
+        // Hint: "PRESS ENTER TO JOIN"
+        font.renderText("PRESS ENTER", 0, 0.8f, -5.0f, 0.35f, 0.5f, 0.5f, 0.5f, true);
+
+        // Fixed camera for name entry
+        Matrix4f view = new Matrix4f().lookAt(
+            0, 5, 8,
+            0, 3, -5,
+            0, 1, 0
+        );
+
+        float aspect = (float) renderer.getWidth() / renderer.getHeight();
+        Matrix4f proj = new Matrix4f().perspective(
+            (float) Math.toRadians(60), aspect,
+            GameConfig.NEAR_PLANE, GameConfig.FAR_PLANE, true
+        );
+        proj.m11(proj.m11() * -1); // Vulkan Y flip
+
+        Matrix4f mvp = new Matrix4f();
+        proj.mul(view, mvp);
+
+        float[] vertices = sceneBuilder.build();
+        renderer.uploadVertices(vertices);
+        renderer.renderFrame(mvp);
+    }
+
+    /** Calculate the end X position of centered text (for cursor placement). */
+    private float getTextEndX(String text, float centerX, float charHeight) {
+        float charWidth = charHeight * 0.6f;
+        float spacing = charHeight * 0.15f;
+        float totalWidth = text.length() * (charWidth + spacing) - spacing;
+        return centerX + totalWidth / 2.0f + spacing;
     }
 
     // ─── LOBBY ───────────────────────────────────────────────────────────

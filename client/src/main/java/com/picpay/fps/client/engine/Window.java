@@ -23,6 +23,11 @@ public class Window {
     private boolean mouseGrabbed = true;
     private boolean leftMousePressed;
 
+    // Text input state
+    private final StringBuilder textInputBuffer = new StringBuilder();
+    private boolean textInputActive = false;
+    private boolean enterPressed = false;
+
     public Window() {
         this.width = GameConfig.WINDOW_WIDTH;
         this.height = GameConfig.WINDOW_HEIGHT;
@@ -49,10 +54,27 @@ public class Window {
             if (key >= 0 && key <= GLFW_KEY_LAST) {
                 keys[key] = (action != GLFW_RELEASE);
             }
-            if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+            if (textInputActive && action == GLFW_PRESS) {
+                if (key == GLFW_KEY_BACKSPACE && textInputBuffer.length() > 0) {
+                    textInputBuffer.deleteCharAt(textInputBuffer.length() - 1);
+                } else if (key == GLFW_KEY_ENTER) {
+                    enterPressed = true;
+                }
+            }
+            if (!textInputActive && key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
                 mouseGrabbed = !mouseGrabbed;
                 glfwSetInputMode(handle, GLFW_CURSOR,
                     mouseGrabbed ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+            }
+        });
+
+        // Char callback for text input
+        glfwSetCharCallback(handle, (window, codepoint) -> {
+            if (textInputActive && textInputBuffer.length() < 16) {
+                char c = (char) codepoint;
+                if (c >= 32 && c < 127) {
+                    textInputBuffer.append(c);
+                }
             }
         });
 
@@ -78,8 +100,9 @@ public class Window {
             resized = true;
         });
 
-        // Grab mouse
-        glfwSetInputMode(handle, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        // Start with cursor visible (name entry / lobby)
+        mouseGrabbed = false;
+        glfwSetInputMode(handle, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
         // Center window
         GLFWVidMode vidMode = glfwGetVideoMode(glfwGetPrimaryMonitor());
@@ -115,6 +138,19 @@ public class Window {
         this.mouseGrabbed = grabbed;
         glfwSetInputMode(handle, GLFW_CURSOR,
             grabbed ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    }
+
+    // Text input methods
+    public void setTextInputActive(boolean active) { this.textInputActive = active; }
+    public String getTextInputBuffer() { return textInputBuffer.toString(); }
+    public void setTextInputBuffer(String text) {
+        textInputBuffer.setLength(0);
+        textInputBuffer.append(text);
+    }
+    public boolean consumeEnterPressed() {
+        boolean e = enterPressed;
+        enterPressed = false;
+        return e;
     }
 
     public void cleanup() {
