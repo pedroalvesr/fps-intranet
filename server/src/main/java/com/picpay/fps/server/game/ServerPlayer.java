@@ -3,6 +3,9 @@ package com.picpay.fps.server.game;
 import com.picpay.fps.shared.math.AABB;
 import org.joml.Vector3f;
 
+import java.net.InetSocketAddress;
+import java.util.UUID;
+
 /**
  * Server-side player state. All authoritative game logic runs here.
  */
@@ -20,7 +23,17 @@ public class ServerPlayer {
     private int lastProcessedInput;
     private float shootCooldown;
     private boolean ready;
-    private java.net.InetSocketAddress address;
+    private InetSocketAddress address;
+
+    // Online session management
+    private UUID sessionToken;
+    private int sessionHash;
+    private long lastHeartbeatTime;
+    private boolean disconnected; // soft-disconnect for reconnect grace period
+    private float disconnectTimer; // time since disconnect (for grace period)
+
+    // Anti-cheat: track last position for speed validation
+    private final Vector3f lastValidatedPosition = new Vector3f();
 
     public ServerPlayer(int id, String name, byte team) {
         this.id = id;
@@ -31,6 +44,11 @@ public class ServerPlayer {
         this.alive = true;
         this.respawnTimer = 0;
         this.shootCooldown = 0;
+        this.lastHeartbeatTime = System.currentTimeMillis();
+
+        // Generate session token
+        this.sessionToken = UUID.randomUUID();
+        this.sessionHash = com.picpay.fps.shared.protocol.ConnectAckPacket.computeSessionHash(sessionToken);
     }
 
     public int getId() { return id; }
@@ -58,8 +76,22 @@ public class ServerPlayer {
     public void setShootCooldown(float cd) { this.shootCooldown = cd; }
     public boolean isReady() { return ready; }
     public void setReady(boolean ready) { this.ready = ready; }
-    public java.net.InetSocketAddress getAddress() { return address; }
-    public void setAddress(java.net.InetSocketAddress address) { this.address = address; }
+    public InetSocketAddress getAddress() { return address; }
+    public void setAddress(InetSocketAddress address) { this.address = address; }
+
+    // Session management
+    public UUID getSessionToken() { return sessionToken; }
+    public int getSessionHash() { return sessionHash; }
+    public long getLastHeartbeatTime() { return lastHeartbeatTime; }
+    public void updateHeartbeat() { this.lastHeartbeatTime = System.currentTimeMillis(); }
+    public boolean isDisconnected() { return disconnected; }
+    public void setDisconnected(boolean disconnected) { this.disconnected = disconnected; }
+    public float getDisconnectTimer() { return disconnectTimer; }
+    public void setDisconnectTimer(float t) { this.disconnectTimer = t; }
+
+    // Anti-cheat
+    public Vector3f getLastValidatedPosition() { return lastValidatedPosition; }
+    public void updateValidatedPosition() { lastValidatedPosition.set(position); }
 
     public AABB getBoundingBox() {
         return AABB.fromCenter(position.x, position.y + 0.9f, position.z, 0.4f, 0.9f, 0.4f);
@@ -95,9 +127,20 @@ public class ServerPlayer {
 
     public void respawn(float x, float y, float z) {
         position.set(x, y, z);
+        lastValidatedPosition.set(x, y, z);
         hp = 100;
         alive = true;
         respawnTimer = 0;
         shootCooldown = 0;
+    }
+
+    /**
+     * Reconnect: update address, reset disconnect state, refresh heartbeat.
+     */
+    public void reconnect(InetSocketAddress newAddress) {
+        this.address = newAddress;
+        this.disconnected = false;
+        this.disconnectTimer = 0;
+        this.lastHeartbeatTime = System.currentTimeMillis();
     }
 }

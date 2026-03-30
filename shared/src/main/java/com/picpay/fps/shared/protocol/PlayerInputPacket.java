@@ -49,13 +49,14 @@ public class PlayerInputPacket extends Packet {
     }
 
     public static PlayerInputPacket deserialize(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data, 3, data.length - 3);
+        ByteBuffer buf = ByteBuffer.wrap(data, Packet.HEADER_SIZE, data.length - Packet.HEADER_SIZE);
         byte keys = buf.get();
         float yaw = buf.getFloat();
         float pitch = buf.getFloat();
         int seq = buf.getInt();
         PlayerInputPacket pkt = new PlayerInputPacket(keys, yaw, pitch, seq);
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 }

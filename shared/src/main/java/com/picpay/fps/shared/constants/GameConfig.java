@@ -8,6 +8,19 @@ public final class GameConfig {
     public static final int MAX_PLAYERS = 20;
     public static final int INTERPOLATION_DELAY_MS = 100;
 
+    // Online networking
+    public static final int SNAPSHOT_RATE = 20; // snapshots per second (was implicitly 64)
+    public static final double SNAPSHOT_INTERVAL = 1.0 / SNAPSHOT_RATE;
+    public static final float HEARTBEAT_INTERVAL = 1.0f; // client sends heartbeat every 1s
+    public static final float HEARTBEAT_TIMEOUT = 10.0f; // disconnect after 10s without heartbeat
+    public static final float RECONNECT_GRACE_PERIOD = 30.0f; // seconds to allow reconnect
+    public static final int MAX_CONNECT_ATTEMPTS_PER_MINUTE = 5;
+    public static final float MAX_SPEED_PER_TICK = 8.0f * (float) TICK_DURATION * 1.5f; // sprint speed * dt * tolerance
+
+    // Reliability
+    public static final int RELIABLE_RETRANSMIT_MS = 200; // retry reliable packet every 200ms
+    public static final int RELIABLE_MAX_RETRIES = 10; // give up after 10 retries (2s)
+
     // Gameplay
     public static final float PLAYER_SPEED = 5.0f;
     public static final float PLAYER_SPRINT_SPEED = 7.5f;

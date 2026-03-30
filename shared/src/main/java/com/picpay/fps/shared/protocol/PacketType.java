@@ -8,6 +8,7 @@ public enum PacketType {
     SHOOT((byte) 0x04),
     CHAT((byte) 0x05),
     PLAYER_READY((byte) 0x06),
+    HEARTBEAT((byte) 0x07),
 
     // Server → Client
     CONNECT_ACK((byte) 0x10),
@@ -20,7 +21,9 @@ public enum PacketType {
     SPAWN((byte) 0x17),
     WORLD_SNAPSHOT((byte) 0x18),
     LOBBY_STATE((byte) 0x19),
-    GAME_START((byte) 0x1A);
+    GAME_START((byte) 0x1A),
+    HEARTBEAT_ACK((byte) 0x1B),
+    DISCONNECT_ACK((byte) 0x1C);
 
     private final byte id;
 
@@ -37,5 +40,14 @@ public enum PacketType {
             if (type.id == id) return type;
         }
         return null;
+    }
+
+    /** Returns true for packet types that require reliable delivery (ack + retransmit). */
+    public boolean isReliable() {
+        return switch (this) {
+            case CONNECT, CONNECT_ACK, DISCONNECT, DISCONNECT_ACK,
+                 GAME_START, KILL_EVENT, SPAWN -> true;
+            default -> false;
+        };
     }
 }

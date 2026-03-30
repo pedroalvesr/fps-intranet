@@ -5,15 +5,19 @@ import com.picpay.fps.shared.constants.GameConfig;
 import com.picpay.fps.shared.protocol.*;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 /**
  * Authoritative game loop running at 64 ticks/second.
- * Manages two phases: LOBBY (waiting for players) and PLAYING (active game).
+ * Manages phases: LOBBY, COUNTDOWN, PLAYING.
+ * Snapshots broadcast at configurable rate (default 20Hz).
  */
 public class GameLoop implements Runnable {
     private static final Logger LOG = Logger.getLogger(GameLoop.class.getName());
@@ -33,14 +37,29 @@ public class GameLoop implements Runnable {
     private float countdownTimer = 0;
     private float lobbyBroadcastTimer = 0;
 
+    // Snapshot rate control
+    private float snapshotTimer = 0;
+
+    // Heartbeat timeout check timer (runs every second, not every tick)
+    private float heartbeatCheckTimer = 0;
+    private static final float HEARTBEAT_CHECK_INTERVAL = 1.0f;
+
+    // Input rate limiting: track inputs processed per tick per player
+    private final Map<Integer, Integer> inputsThisTick = new ConcurrentHashMap<>();
+
     // Callback to send packets to clients
     private BiConsumer<ServerPlayer, byte[]> sendToPlayer;
-    private java.util.function.Consumer<byte[]> broadcastAll;
+    private Consumer<byte[]> broadcastAll;
+
+    // Callback to remove player sessions (set by ServerNetworkManager)
+    private Consumer<ServerPlayer> removePlayerSession;
 
     public void setSendToPlayer(BiConsumer<ServerPlayer, byte[]> fn) { this.sendToPlayer = fn; }
-    public void setBroadcastAll(java.util.function.Consumer<byte[]> fn) { this.broadcastAll = fn; }
+    public void setBroadcastAll(Consumer<byte[]> fn) { this.broadcastAll = fn; }
+    public void setRemovePlayerSession(Consumer<ServerPlayer> fn) { this.removePlayerSession = fn; }
 
     public Phase getPhase() { return phase; }
+    public int getTick() { return tick; }
 
     public ServerPlayer addPlayer(String name, java.net.InetSocketAddress address) {
         int id = nextPlayerId.getAndIncrement();
@@ -62,7 +81,8 @@ public class GameLoop implements Runnable {
     public void removePlayer(int playerId) {
         ServerPlayer removed = players.remove(playerId);
         if (removed != null) {
-            LOG.info("Player left: " + removed.getName());
+            LOG.info("Player removed: " + removed.getName());
+            if (removePlayerSession != null) removePlayerSession.accept(removed);
             // If in countdown and not enough players/ready anymore, cancel
             if (phase == Phase.COUNTDOWN) {
                 checkCountdownConditions();
@@ -81,18 +101,16 @@ public class GameLoop implements Runnable {
     private void checkCountdownConditions() {
         if (phase == Phase.PLAYING) return;
 
-        int totalPlayers = players.size();
-        long readyCount = players.values().stream().filter(ServerPlayer::isReady).count();
+        int totalPlayers = (int) players.values().stream().filter(p -> !p.isDisconnected()).count();
+        long readyCount = players.values().stream().filter(p -> !p.isDisconnected() && p.isReady()).count();
         boolean enoughPlayers = totalPlayers >= GameConfig.MIN_PLAYERS_TO_START;
         boolean allReady = readyCount == totalPlayers && totalPlayers > 0;
 
         if (enoughPlayers && allReady && phase != Phase.COUNTDOWN) {
-            // Start countdown
             phase = Phase.COUNTDOWN;
             countdownTimer = GameConfig.LOBBY_COUNTDOWN_SECONDS;
             LOG.info("All players ready! Countdown started: " + GameConfig.LOBBY_COUNTDOWN_SECONDS + "s");
         } else if (phase == Phase.COUNTDOWN && (!enoughPlayers || !allReady)) {
-            // Cancel countdown
             phase = Phase.LOBBY;
             countdownTimer = 0;
             LOG.info("Countdown cancelled — not all players ready");
@@ -105,6 +123,7 @@ public class GameLoop implements Runnable {
 
         // Spawn all players
         for (ServerPlayer player : players.values()) {
+            if (player.isDisconnected()) continue;
             float[] spawn = map.getSpawnPoint(player.getTeam());
             player.respawn(spawn[0], spawn[1], spawn[2]);
         }
@@ -115,6 +134,7 @@ public class GameLoop implements Runnable {
 
         // Broadcast spawns
         for (ServerPlayer player : players.values()) {
+            if (player.isDisconnected()) continue;
             SpawnPacket spawnPkt = new SpawnPacket(player.getId(),
                 player.getPosition().x, player.getPosition().y, player.getPosition().z);
             if (broadcastAll != null) broadcastAll.accept(spawnPkt.serialize());
@@ -129,7 +149,11 @@ public class GameLoop implements Runnable {
         if (phase != Phase.PLAYING) return;
 
         ServerPlayer player = players.get(playerId);
-        if (player == null) return;
+        if (player == null || player.isDisconnected()) return;
+
+        // Rate limit: max 1 input per tick per player
+        int count = inputsThisTick.merge(playerId, 1, Integer::sum);
+        if (count > 1) return; // discard excess
 
         float dt = (float) GameConfig.TICK_DURATION;
 
@@ -138,6 +162,17 @@ public class GameLoop implements Runnable {
             input.isLeft(), input.isRight(),
             input.isSprint(),
             input.getYaw(), input.getPitch(), dt);
+
+        // Speed validation (anti-cheat)
+        float distSq = player.getPosition().distanceSquared(player.getLastValidatedPosition());
+        float maxDist = GameConfig.MAX_SPEED_PER_TICK;
+        if (distSq > maxDist * maxDist * 4) { // generous tolerance (2x)
+            // Snap back — possible speed hack
+            player.getPosition().set(player.getLastValidatedPosition());
+            LOG.warning("Speed violation from player " + player.getName() + " (id=" + playerId + ")");
+        } else {
+            player.updateValidatedPosition();
+        }
 
         player.setLastProcessedInput(input.getInputSequence());
 
@@ -164,6 +199,7 @@ public class GameLoop implements Runnable {
     @Override
     public void run() {
         LOG.info("Game loop started at " + GameConfig.TICK_RATE + " ticks/s");
+        LOG.info("Snapshot rate: " + GameConfig.SNAPSHOT_RATE + " Hz");
         LOG.info("Waiting for players in LOBBY...");
         long tickNanos = (long) (GameConfig.TICK_DURATION * 1_000_000_000);
 
@@ -190,10 +226,54 @@ public class GameLoop implements Runnable {
         tick++;
         float dt = (float) GameConfig.TICK_DURATION;
 
+        // Clear per-tick rate limit counters
+        inputsThisTick.clear();
+
+        // Check heartbeat timeouts periodically
+        heartbeatCheckTimer -= dt;
+        if (heartbeatCheckTimer <= 0) {
+            checkHeartbeatTimeouts();
+            heartbeatCheckTimer = HEARTBEAT_CHECK_INTERVAL;
+        }
+
+        // Update disconnect grace period timers
+        updateDisconnectTimers(dt);
+
         switch (phase) {
             case LOBBY -> updateLobby(dt);
             case COUNTDOWN -> updateCountdown(dt);
             case PLAYING -> updatePlaying(dt);
+        }
+    }
+
+    private void checkHeartbeatTimeouts() {
+        long now = System.currentTimeMillis();
+        long timeoutMs = (long) (GameConfig.HEARTBEAT_TIMEOUT * 1000);
+
+        for (ServerPlayer player : players.values()) {
+            if (player.isDisconnected()) continue;
+            if (now - player.getLastHeartbeatTime() > timeoutMs) {
+                LOG.info("Player " + player.getName() + " timed out (no heartbeat for " +
+                    GameConfig.HEARTBEAT_TIMEOUT + "s)");
+                player.setDisconnected(true);
+                player.setDisconnectTimer(0);
+            }
+        }
+    }
+
+    private void updateDisconnectTimers(float dt) {
+        List<Integer> toRemove = new ArrayList<>();
+        for (ServerPlayer player : players.values()) {
+            if (player.isDisconnected()) {
+                player.setDisconnectTimer(player.getDisconnectTimer() + dt);
+                if (player.getDisconnectTimer() >= GameConfig.RECONNECT_GRACE_PERIOD) {
+                    toRemove.add(player.getId());
+                }
+            }
+        }
+        for (int id : toRemove) {
+            LOG.info("Removing player " + id + " after reconnect grace period expired");
+            removePlayer(id);
         }
     }
 
@@ -222,6 +302,7 @@ public class GameLoop implements Runnable {
     private void updatePlaying(float dt) {
         // Update cooldowns and respawns
         for (ServerPlayer player : players.values()) {
+            if (player.isDisconnected()) continue;
             if (player.getShootCooldown() > 0) {
                 player.setShootCooldown(player.getShootCooldown() - dt);
             }
@@ -236,14 +317,19 @@ public class GameLoop implements Runnable {
             }
         }
 
-        // Broadcast world snapshot
-        broadcastWorldSnapshot();
+        // Broadcast world snapshot at reduced rate
+        snapshotTimer -= dt;
+        if (snapshotTimer <= 0) {
+            broadcastWorldSnapshot();
+            snapshotTimer = (float) GameConfig.SNAPSHOT_INTERVAL;
+        }
     }
 
     private void broadcastLobbyState() {
         if (broadcastAll == null) return;
 
         LobbyStatePacket.LobbyPlayer[] lobbyPlayers = players.values().stream()
+            .filter(p -> !p.isDisconnected())
             .map(p -> new LobbyStatePacket.LobbyPlayer(p.getId(), p.getName(), p.getTeam(), p.isReady()))
             .toArray(LobbyStatePacket.LobbyPlayer[]::new);
 
@@ -260,10 +346,17 @@ public class GameLoop implements Runnable {
     private void broadcastWorldSnapshot() {
         if (broadcastAll == null || players.isEmpty()) return;
 
-        int count = players.size();
+        // Only include active (non-disconnected) players
+        List<ServerPlayer> activePlayers = players.values().stream()
+            .filter(p -> !p.isDisconnected())
+            .toList();
+
+        int count = activePlayers.size();
+        if (count == 0) return;
+
         ByteBuffer statesBuf = ByteBuffer.allocate(count * 31);
 
-        for (ServerPlayer p : players.values()) {
+        for (ServerPlayer p : activePlayers) {
             statesBuf.putInt(p.getId());
             statesBuf.putFloat(p.getPosition().x);
             statesBuf.putFloat(p.getPosition().y);

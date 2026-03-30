@@ -31,11 +31,12 @@ public class KillEventPacket extends Packet {
     }
 
     public static KillEventPacket deserialize(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data, 3, data.length - 3);
+        ByteBuffer buf = ByteBuffer.wrap(data, Packet.HEADER_SIZE, data.length - Packet.HEADER_SIZE);
         int killer = buf.getInt();
         int victim = buf.getInt();
         KillEventPacket pkt = new KillEventPacket(killer, victim);
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 }

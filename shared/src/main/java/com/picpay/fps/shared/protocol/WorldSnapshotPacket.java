@@ -35,13 +35,14 @@ public class WorldSnapshotPacket extends Packet {
     }
 
     public static WorldSnapshotPacket deserialize(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data, 3, data.length - 3);
+        ByteBuffer buf = ByteBuffer.wrap(data, Packet.HEADER_SIZE, data.length - Packet.HEADER_SIZE);
         int tick = buf.getInt();
         int count = buf.get() & 0xFF;
         byte[] states = new byte[buf.remaining()];
         buf.get(states);
         WorldSnapshotPacket pkt = new WorldSnapshotPacket(tick, count, states);
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 }

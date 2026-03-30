@@ -8,6 +8,8 @@ import com.picpay.fps.shared.protocol.*;
 import org.joml.Matrix4f;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -16,7 +18,8 @@ import static org.lwjgl.glfw.GLFW.*;
 
 /**
  * Main game client — ties together rendering, networking, and input.
- * Manages LOBBY and PLAYING states.
+ * Manages NAME_ENTRY, LOBBY, and PLAYING states.
+ * Online features: interpolation, client-side prediction with reconciliation.
  */
 public class GameClient {
     private static final Logger LOG = Logger.getLogger(GameClient.class.getName());
@@ -52,6 +55,10 @@ public class GameClient {
 
     // Name entry
     private boolean skipNameEntry = false;
+
+    // Client-side prediction: buffer of unacknowledged inputs
+    private final Deque<PredictedInput> pendingInputs = new ArrayDeque<>();
+    private static final int MAX_PENDING_INPUTS = 128;
 
     public static void main(String[] args) {
         GameClient client = new GameClient();
@@ -144,6 +151,8 @@ public class GameClient {
             while (accumulator >= tickDuration) {
                 if (state != State.NAME_ENTRY) {
                     processNetworkPackets();
+                    // Tick the network manager (heartbeat, etc.)
+                    if (network != null) network.tick();
                 }
 
                 switch (state) {
@@ -259,8 +268,7 @@ public class GameClient {
         boolean rPressed = window.isKeyDown(GLFW_KEY_R);
         if (rPressed && !readyKeyWasPressed) {
             localReady = !localReady;
-            PlayerReadyPacket pkt = new PlayerReadyPacket(localReady);
-            network.send(pkt.serialize());
+            network.sendReady(localReady);
             LOG.info("Ready: " + localReady);
         }
         readyKeyWasPressed = rPressed;
@@ -306,6 +314,7 @@ public class GameClient {
         LOG.info("=== GAME STARTING! ===");
         // Grab mouse for FPS controls
         window.setMouseGrabbed(true);
+        pendingInputs.clear();
     }
 
     // ─── PLAYING ─────────────────────────────────────────────────────────
@@ -326,7 +335,7 @@ public class GameClient {
 
         network.sendInput(keys, camera.getYaw(), camera.getPitch());
 
-        // Client-side prediction
+        // Client-side prediction: apply locally
         float dt = (float) GameConfig.TICK_DURATION;
         float speed = window.isKeyDown(GLFW_KEY_LEFT_SHIFT) ? GameConfig.PLAYER_SPRINT_SPEED : GameConfig.PLAYER_SPEED;
 
@@ -341,9 +350,21 @@ public class GameClient {
 
         float len = (float) Math.sqrt(dx * dx + dz * dz);
         if (len > 0) {
-            camera.getPosition().x += (dx / len) * speed * dt;
-            camera.getPosition().z += (dz / len) * speed * dt;
+            float moveX = (dx / len) * speed * dt;
+            float moveZ = (dz / len) * speed * dt;
+            camera.getPosition().x += moveX;
+            camera.getPosition().z += moveZ;
         }
+
+        // Store predicted input for reconciliation
+        if (pendingInputs.size() >= MAX_PENDING_INPUTS) {
+            pendingInputs.pollFirst();
+        }
+        pendingInputs.addLast(new PredictedInput(
+            network.getLocalPlayerId(), // will be current seq-1 since sendInput increments
+            keys, camera.getYaw(), camera.getPitch(),
+            camera.getPosition().x, camera.getPosition().y - 1.6f, camera.getPosition().z
+        ));
     }
 
     private void renderGame() {
@@ -351,7 +372,14 @@ public class GameClient {
         sceneBuilder.addMap();
 
         for (RemotePlayer rp : remotePlayers.values()) {
-            sceneBuilder.addPlayer(rp.x, rp.y, rp.z, rp.yaw, rp.team, rp.alive);
+            // Interpolate between previous and current position
+            float t = rp.interpolationT();
+            float ix = rp.prevX + (rp.x - rp.prevX) * t;
+            float iy = rp.prevY + (rp.y - rp.prevY) * t;
+            float iz = rp.prevZ + (rp.z - rp.prevZ) * t;
+            float iyaw = lerpAngle(rp.prevYaw, rp.yaw, t);
+
+            sceneBuilder.addPlayer(ix, iy, iz, iyaw, rp.team, rp.alive);
         }
 
         sceneBuilder.addCrosshair(
@@ -408,14 +436,41 @@ public class GameClient {
             int lastInputSeq = buf.getInt();
 
             if (id == network.getLocalPlayerId()) {
-                camera.getPosition().set(x, y + 1.6f, z);
+                // Server reconciliation: discard acknowledged inputs
+                while (!pendingInputs.isEmpty()) {
+                    PredictedInput pi = pendingInputs.peekFirst();
+                    if (pi.sequence <= lastInputSeq) {
+                        pendingInputs.pollFirst();
+                    } else {
+                        break;
+                    }
+                }
+
+                // Check divergence — if server position differs significantly, correct
+                float camWorldX = camera.getPosition().x;
+                float camWorldZ = camera.getPosition().z;
+                float distSq = (x - camWorldX) * (x - camWorldX) + (z - camWorldZ) * (z - camWorldZ);
+
+                // If divergence > threshold, snap to server position and replay pending inputs
+                if (distSq > 4.0f) { // ~2 units divergence
+                    camera.getPosition().set(x, y + 1.6f, z);
+                    // Replay pending inputs on top of corrected position
+                    for (PredictedInput pi : pendingInputs) {
+                        applyPredictedMovement(pi);
+                    }
+                }
+                // Small divergences: trust client prediction (feels smoother)
             } else {
+                // Remote player: update with interpolation support
                 RemotePlayer rp = remotePlayers.computeIfAbsent(id, k -> new RemotePlayer());
+                rp.prevX = rp.x; rp.prevY = rp.y; rp.prevZ = rp.z;
+                rp.prevYaw = rp.yaw;
                 rp.x = x; rp.y = y; rp.z = z;
                 rp.yaw = yaw; rp.pitch = pitch;
                 rp.hp = hp; rp.weapon = weapon; rp.team = team;
                 rp.alive = hp > 0;
                 rp.lastUpdate = System.currentTimeMillis();
+                rp.snapshotReceiveTime = System.currentTimeMillis();
             }
         }
 
@@ -423,10 +478,32 @@ public class GameClient {
         remotePlayers.entrySet().removeIf(e -> now - e.getValue().lastUpdate > 5000);
     }
 
+    private void applyPredictedMovement(PredictedInput input) {
+        float dt = (float) GameConfig.TICK_DURATION;
+        boolean sprint = (input.keys & 0x20) != 0;
+        float speed = sprint ? GameConfig.PLAYER_SPRINT_SPEED : GameConfig.PLAYER_SPEED;
+
+        float dx = 0, dz = 0;
+        float sinYaw = (float) Math.sin(input.yaw);
+        float cosYaw = (float) Math.cos(input.yaw);
+
+        if ((input.keys & 0x01) != 0) { dx += sinYaw; dz -= cosYaw; }
+        if ((input.keys & 0x02) != 0) { dx -= sinYaw; dz += cosYaw; }
+        if ((input.keys & 0x04) != 0) { dx -= cosYaw; dz -= sinYaw; }
+        if ((input.keys & 0x08) != 0) { dx += cosYaw; dz += sinYaw; }
+
+        float len = (float) Math.sqrt(dx * dx + dz * dz);
+        if (len > 0) {
+            camera.getPosition().x += (dx / len) * speed * dt;
+            camera.getPosition().z += (dz / len) * speed * dt;
+        }
+    }
+
     private void handleSpawn(byte[] data) {
         SpawnPacket pkt = SpawnPacket.deserialize(data);
         if (pkt.getPlayerId() == network.getLocalPlayerId()) {
             camera.getPosition().set(pkt.getX(), pkt.getY() + 1.6f, pkt.getZ());
+            pendingInputs.clear();
             LOG.info("Respawned!");
         }
     }
@@ -438,6 +515,16 @@ public class GameClient {
         LOG.info(killerName + " killed " + victimName);
     }
 
+    // ─── UTILITIES ───────────────────────────────────────────────────────
+
+    /** Lerp angles handling wraparound. */
+    private float lerpAngle(float a, float b, float t) {
+        float diff = b - a;
+        while (diff > Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+        return a + diff * t;
+    }
+
     // ─── CLEANUP ─────────────────────────────────────────────────────────
 
     private void cleanup() {
@@ -447,11 +534,25 @@ public class GameClient {
         if (window != null) window.cleanup();
     }
 
+    // ─── INNER CLASSES ───────────────────────────────────────────────────
+
     static class RemotePlayer {
         float x, y, z;
         float yaw, pitch;
+        float prevX, prevY, prevZ, prevYaw;
         byte hp, weapon, team;
         boolean alive = true;
         long lastUpdate;
+        long snapshotReceiveTime;
+
+        /** Returns interpolation factor [0..1] based on time since last snapshot. */
+        float interpolationT() {
+            long elapsed = System.currentTimeMillis() - snapshotReceiveTime;
+            float snapshotInterval = 1000.0f / GameConfig.SNAPSHOT_RATE;
+            return Math.min(1.0f, elapsed / snapshotInterval);
+        }
     }
+
+    /** Stores a predicted input for server reconciliation. */
+    record PredictedInput(int sequence, byte keys, float yaw, float pitch, float posX, float posY, float posZ) {}
 }

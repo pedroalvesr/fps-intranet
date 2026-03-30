@@ -52,7 +52,7 @@ public class LobbyStatePacket extends Packet {
     }
 
     public static LobbyStatePacket deserialize(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data, 3, data.length - 3);
+        ByteBuffer buf = ByteBuffer.wrap(data, Packet.HEADER_SIZE, data.length - Packet.HEADER_SIZE);
         byte phase = buf.get();
         byte countdown = buf.get();
         int count = buf.get() & 0xFF;
@@ -63,13 +63,14 @@ public class LobbyStatePacket extends Packet {
             byte team = buf.get();
             boolean ready = buf.get() == 1;
             int nameLen = buf.get() & 0xFF;
-            byte[] nameBytes = new byte[nameLen];
+            byte[] nameBytes = new byte[Math.min(nameLen, buf.remaining())];
             buf.get(nameBytes);
             players[i] = new LobbyPlayer(id, new String(nameBytes, StandardCharsets.UTF_8), team, ready);
         }
 
         LobbyStatePacket pkt = new LobbyStatePacket(phase, countdown, players);
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 

@@ -17,6 +17,7 @@ public class GameStartPacket extends Packet {
     public static GameStartPacket deserialize(byte[] data) {
         GameStartPacket pkt = new GameStartPacket();
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 }

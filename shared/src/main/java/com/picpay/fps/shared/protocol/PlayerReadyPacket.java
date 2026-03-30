@@ -25,10 +25,11 @@ public class PlayerReadyPacket extends Packet {
     }
 
     public static PlayerReadyPacket deserialize(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data, 3, data.length - 3);
+        ByteBuffer buf = ByteBuffer.wrap(data, Packet.HEADER_SIZE, data.length - Packet.HEADER_SIZE);
         boolean ready = buf.get() == 1;
         PlayerReadyPacket pkt = new PlayerReadyPacket(ready);
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 }

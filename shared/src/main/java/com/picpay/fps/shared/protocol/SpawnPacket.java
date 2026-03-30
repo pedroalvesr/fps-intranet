@@ -35,11 +35,12 @@ public class SpawnPacket extends Packet {
     }
 
     public static SpawnPacket deserialize(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data, 3, data.length - 3);
+        ByteBuffer buf = ByteBuffer.wrap(data, Packet.HEADER_SIZE, data.length - Packet.HEADER_SIZE);
         int id = buf.getInt();
         float x = buf.getFloat(), y = buf.getFloat(), z = buf.getFloat();
         SpawnPacket pkt = new SpawnPacket(id, x, y, z);
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 }

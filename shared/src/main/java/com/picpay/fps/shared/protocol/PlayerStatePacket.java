@@ -58,7 +58,7 @@ public class PlayerStatePacket extends Packet {
     }
 
     public static PlayerStatePacket deserialize(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data, 3, data.length - 3);
+        ByteBuffer buf = ByteBuffer.wrap(data, Packet.HEADER_SIZE, data.length - Packet.HEADER_SIZE);
         int id = buf.getInt();
         float x = buf.getFloat(), y = buf.getFloat(), z = buf.getFloat();
         float yaw = buf.getFloat(), pitch = buf.getFloat();
@@ -66,6 +66,7 @@ public class PlayerStatePacket extends Packet {
         int seq = buf.getInt();
         PlayerStatePacket pkt = new PlayerStatePacket(id, x, y, z, yaw, pitch, hp, weapon, team, seq);
         pkt.setSequence(Packet.peekSequence(data));
+        pkt.setSessionHash(Packet.peekSessionHash(data));
         return pkt;
     }
 }

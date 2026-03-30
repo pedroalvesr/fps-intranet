@@ -17,10 +17,14 @@ public class GameServer {
         LOG.info("=== FPS Intranet Server ===");
         LOG.info("Max players: " + GameConfig.MAX_PLAYERS);
         LOG.info("Tick rate: " + GameConfig.TICK_RATE + " Hz");
+        LOG.info("Snapshot rate: " + GameConfig.SNAPSHOT_RATE + " Hz");
         LOG.info("Port: " + GameConfig.SERVER_PORT);
 
         GameLoop gameLoop = new GameLoop();
         ServerNetworkManager network = new ServerNetworkManager(gameLoop);
+
+        // Wire the remove-session callback so GameLoop can clean up network state
+        gameLoop.setRemovePlayerSession(network::removePlayerSession);
 
         // Start network (binds UDP port)
         network.start();
